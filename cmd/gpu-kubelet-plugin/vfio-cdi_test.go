@@ -42,6 +42,15 @@ func TestNewVfioCDIHandler(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, handler.iommuFDEnabled)
 	})
+
+	t.Run("error when /dev is not a directory", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(hostRoot, "dev"), nil, 0o644))
+
+		handler, err := NewVfioCDIHandler(&deviceLib{hostRoot: hostRoot})
+		require.ErrorContains(t, err, "error checking if iommu device node exists")
+		require.Nil(t, handler)
+	})
 }
 
 func TestVfioCDIHandlerGetCommonEdits(t *testing.T) {
