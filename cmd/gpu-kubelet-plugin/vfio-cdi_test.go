@@ -27,13 +27,13 @@ import (
 )
 
 func TestNewVfioCDIHandler(t *testing.T) {
-	t.Run("iommufd disabled when /dev/iommu missing", func(t *testing.T) {
+	t.Run("iommufd disabled when iommu device node missing", func(t *testing.T) {
 		handler, err := NewVfioCDIHandler(&deviceLib{hostRoot: t.TempDir()})
 		require.NoError(t, err)
 		require.False(t, handler.iommuFDEnabled)
 	})
 
-	t.Run("iommufd enabled when /dev/iommu exists", func(t *testing.T) {
+	t.Run("iommufd enabled when iommu device node exists", func(t *testing.T) {
 		hostRoot := t.TempDir()
 		require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, "dev"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(hostRoot, iommuDevicePath), nil, 0o644))
@@ -43,7 +43,7 @@ func TestNewVfioCDIHandler(t *testing.T) {
 		require.True(t, handler.iommuFDEnabled)
 	})
 
-	t.Run("error when /dev is not a directory", func(t *testing.T) {
+	t.Run("error when dev is not a directory", func(t *testing.T) {
 		hostRoot := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(hostRoot, "dev"), nil, 0o644))
 
@@ -109,6 +109,10 @@ func TestVfioCDIHandlerGetCommonEdits(t *testing.T) {
 }
 
 func TestVfioCDIHandlerGetDeviceSpecsByPCIBusID(t *testing.T) {
+	const testPCIBusID = "0000:01:00.0"
+
+	errDeviceNotFound := errors.New("device not found")
+
 	testCases := []struct {
 		name           string
 		preferIommuFD  bool
@@ -117,32 +121,41 @@ func TestVfioCDIHandlerGetDeviceSpecsByPCIBusID(t *testing.T) {
 		deviceErr      error
 		expectedPath   string
 		expectedErr    string
+		expectedErrIs  error
 	}{
 		{
 			name:           "legacy vfio group device",
 			preferIommuFD:  false,
 			iommuFDEnabled: true,
-			device:         &nvpci.NvidiaPCIDevice{Address: "0000:01:00.0", IommuGroup: 42},
+			device:         &nvpci.NvidiaPCIDevice{Address: testPCIBusID, IommuGroup: 42},
+			expectedPath:   "/dev/vfio/42",
+		},
+		{
+			name:           "iommufd preferred but not enabled",
+			preferIommuFD:  true,
+			iommuFDEnabled: false,
+			device:         &nvpci.NvidiaPCIDevice{Address: testPCIBusID, IommuGroup: 42},
 			expectedPath:   "/dev/vfio/42",
 		},
 		{
 			name:           "iommufd cdev",
 			preferIommuFD:  true,
 			iommuFDEnabled: true,
-			device:         &nvpci.NvidiaPCIDevice{Address: "0000:01:00.0", IommuFD: "vfio0"},
+			device:         &nvpci.NvidiaPCIDevice{Address: testPCIBusID, IommuFD: "vfio0"},
 			expectedPath:   "/dev/vfio/devices/vfio0",
 		},
 		{
 			name:           "iommufd cdev missing",
 			preferIommuFD:  true,
 			iommuFDEnabled: true,
-			device:         &nvpci.NvidiaPCIDevice{Address: "0000:01:00.0"},
+			device:         &nvpci.NvidiaPCIDevice{Address: testPCIBusID},
 			expectedErr:    "missing iommufd cdev",
 		},
 		{
-			name:        "pci lookup error",
-			deviceErr:   errors.New("device not found"),
-			expectedErr: "error getting PCI device info",
+			name:          "pci lookup error",
+			deviceErr:     errDeviceNotFound,
+			expectedErr:   "error getting PCI device info",
+			expectedErrIs: errDeviceNotFound,
 		},
 	}
 
@@ -152,16 +165,20 @@ func TestVfioCDIHandlerGetDeviceSpecsByPCIBusID(t *testing.T) {
 				iommuFDEnabled: tc.iommuFDEnabled,
 				deviceLib: &deviceLib{
 					nvpci: &nvpci.InterfaceMock{
-						GetGPUByPciBusIDFunc: func(s string) (*nvpci.NvidiaPCIDevice, error) {
+						GetGPUByPciBusIDFunc: func(busID string) (*nvpci.NvidiaPCIDevice, error) {
+							require.Equal(t, testPCIBusID, busID)
 							return tc.device, tc.deviceErr
 						},
 					},
 				},
 			}
 
-			specs, err := handler.GetDeviceSpecsByPCIBusID("0000:01:00.0", tc.preferIommuFD)
+			specs, err := handler.GetDeviceSpecsByPCIBusID(testPCIBusID, tc.preferIommuFD)
 			if tc.expectedErr != "" {
 				require.ErrorContains(t, err, tc.expectedErr)
+				if tc.expectedErrIs != nil {
+					require.ErrorIs(t, err, tc.expectedErrIs)
+				}
 				return
 			}
 			require.NoError(t, err)
